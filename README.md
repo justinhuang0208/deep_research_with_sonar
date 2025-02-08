@@ -25,7 +25,7 @@ Deep Researcher is a Python-based research assistant that automates the process 
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/justinhuang0208/deep_research_with_sonar
+    git clone https://github.com/justinhuang0208/deep_researcher_with_sonar
     cd deep_researcher_with_sonar
     ```
 
