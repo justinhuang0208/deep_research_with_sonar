@@ -6,6 +6,7 @@ import requests
 from openai import OpenAI
 from collections import deque
 from typing import List, Dict
+from datetime import date
 
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -164,9 +165,10 @@ def process_citations():
 def analyze_task(query: str, history: List[Dict]) -> Dict:
     """Task analysis and planning"""
     
-    prompt = """You need to break down the research topic into sub-questions and generate English search queries for each sub-question, describing the keywords in natural language, without using overly specific search terms.
+    prompt = """You need to break down the content in the discussion of research topic before into detailed sub-questions and generate 1 ~ 3 search queries for each sub-question, describing the keywords in natural language, without using overly specific search terms.
     Keywords like "2024" or "launch date" should be avoided.
-    For example sub-question: What are the differences in target markets and service offerings between Starlink and OneWeb in 2024?
+    For example sub-question: 
+    Q1: What are the differences in target markets and service offerings between Starlink and OneWeb in 2024?
     Can generate the following search questions:
     1. Starlink target market in 2024
     2. Starlink service offerings in 2024
@@ -176,7 +178,7 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
     {
         "sub_questions": [
             {
-                "question": "Subproblem description",
+                "question": "Research Goal",
                 "keywords": ["Search term 1", "Search term 2"]
             }
         ]
@@ -190,7 +192,7 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
     json_str = re.search(r'```json\n(.*?)\n```', response, re.DOTALL).group(1)
     return json.loads(json_str)
 
-def execute_dynamic_search(sub_question: Dict, history: List[Dict]) -> Dict:
+def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
     """Execute dynamic search process (integrated result saving)"""
 
     search_queue = deque(sub_question["keywords"])
@@ -214,20 +216,21 @@ def execute_dynamic_search(sub_question: Dict, history: List[Dict]) -> Dict:
             processed.add(query)
 
         if depth < MAX_SEARCH_DEPTH and current_results:
-            analysis_prompt = f"""Synthesize the following results:
+            analysis_prompt = f"""the main goal of the research is {main_goal}.
+            Synthesize the following results:
             ## Sub Question:{sub_question['question']}
             ## Current Search Results:
             {current_results}
             please generate:
-            1. Completeness score(0-100)
-            2. Supplementary search directions needed (up to 3)
-            3. New precise search terms (up to 3)
+            1. Completeness score(0-100): Judge whether the search results are complete and sufficient to answer the sub-question and main goal or not.
+            2. Statement of supplementary search directions needed
+            3. New precise search terms (up to 3) based on the statement of suplementary search directions needed.
             Respond according to the following JSON format:
             ```json
             {{
                 "score": Completeness score,
-                "missing_info": ["Supplement Direction 1", "Supplement Direction 2"],
-                "new_queries": ["New Search Term 1", "New Search Term 2"]
+                "missing_info": Statement of supplementary search directions needed,
+                "new_queries": ["New Search query 1", "New Search query 2"]
             }}
             ```"""
             analysis_response = call_openrouter(analysis_prompt, history, ANALYSIS_MODEL)
@@ -237,11 +240,11 @@ def execute_dynamic_search(sub_question: Dict, history: List[Dict]) -> Dict:
                 json_string = json_match.group(1).strip()
                 try:
                     analysis = json.loads(json_string)
-                    if "new_queries" in analysis and analysis.get("score", 0) < 80:
-                        print(f"Add supplementary search: {analysis['new_queries']}")
+                    if "new_queries" in analysis and analysis.get("score", None) < 80:
+                        print(f"\nGet {analysis.get("score", 0)}. {analysis.get("missing_info", None)} Add supplementary search: {analysis['new_queries']}\n")
                         search_queue.extend(analysis["new_queries"])
                     else:
-                        print("No supplementary search needed\n")
+                        print(f"\nGet {analysis.get("score", 0)}. No supplementary search needed\n")
                 except json.JSONDecodeError as e:
                     logger.error(f"JSONDecodeError: {e}")
                     logger.error(f"Problematic JSON string: {json_string}")
@@ -258,12 +261,17 @@ def generate_research_report(history: List[Dict]) -> str:
 
     processed_content = process_citations()
 
-    prompt = """Please merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list. Please write in English."""
+    prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. The report should be persuasive, explain the cause and effect relationships.
+            Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list."""
     return call_openrouter(
         prompt=prompt + "\n" + processed_content,
         history=history,
         model=WRITING_MODEL
     )
+    
+def organize_search_results(search_results: List[Dict]) -> str:
+    """Organize all the search results in the same sub-question"""
+    return
 
 def main_flow():
     
@@ -271,18 +279,19 @@ def main_flow():
         logger.error("Please set the environment variables PERPLEXITY_API_KEY and OPENROUTER_API_KEY.")
         return
 
-    system_prompt = """You are a professional research assistant responsible for assisting users in conducting in-depth research.
-                       You need to conduct research direction discussions, task analysis, dynamic search, and generate a final report based on the user's research topic.
-                       1. Research direction discussion: Determine research goals, key aspects to explore and important themes, research depth, and research scope with the user.
-                       2. Task analysis: Decompose the research direction discussed earlier into specific research tasks and generate specific research questions.
-                       3. Analyze and comment on the current status of the research question to see if there is any content that needs to be supplemented.
-                       4. Generate research report: Based on the previous research results and discussions, generate an in-depth research report that meets user expectations."""
+    system_prompt = f"""You are a professional research assistant responsible for assisting users in conducting in-depth research.
+                        Current date: {date.today()}
+                        You need to conduct research direction discussions, task analysis, dynamic search, and generate a final report based on the user's research topic.
+                        1. Research direction discussion: Determine research goals, key aspects to explore and important themes, research depth, and research scope with the user.
+                        2. Task analysis: Decompose the research direction discussed earlier into specific research tasks and generate specific research questions.
+                        3. Analyze and comment on the current status of the research question to see if there is any content that needs to be supplemented.
+                        4. Generate research report: Based on the previous research results and discussions, generate an in-depth research report that meets user expectations."""
     conversation_history = [{"role": "system", "content": system_prompt}]
     
     try:
         user_query = input("Please enter the research topic:")
 
-        print("Performing initial search\n")
+        print("\nPerforming initial search\n")
         init_search = call_perplexity(user_query, "sonar")['content']
         user_prompt = f"""Discuss the research direction with the user and correct.
                     This is the initial search result for this research topic, which gives you some preliminary understanding of the topic to propose the correct research direction: {init_search}
@@ -296,19 +305,21 @@ def main_flow():
                 user_query = input("Please re-enter the research topic:")
                 print(call_openrouter(user_query, conversation_history))
         print("\n")
+        main_goal = conversation_history
         
         # Task Analysis Stage
         print("Analyzing research tasks...")
         task_plan = analyze_task(user_query, conversation_history)
+        print(json.dumps(task_plan, indent=4))
         
         # Dynamic Search Execution
         print("Starting to execute in-depth search...")
         for sub in task_plan["sub_questions"]:
-            execute_dynamic_search(sub, conversation_history)
+            execute_dynamic_search(sub, conversation_history, main_goal)
         
         # Generate Final Report
         print("Generating research report...")
-        report = generate_research_report(conversation_history)
+        report = generate_research_report(main_goal)
         
         # Save Results
         with open("research_report.md", "w", encoding="utf-8") as f:
