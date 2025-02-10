@@ -13,7 +13,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 SEARCH_RESULTS_FILE = "search_results.md"
 SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS = "search_results_with_global_citations.md"
 DEFAULT_MODEL = "google/gemini-2.0-flash-001"
-ANALYSIS_MODEL = "google/gemini-2.0-flash-001"
+ANALYSIS_MODEL = "deepseek/deepseek-r1"
 WRITING_MODEL = "google/gemini-2.0-flash-001"
 MAX_SEARCH_DEPTH = 2
 MODEL_ENDPOINT = "https://openrouter.ai/api/v1"
@@ -41,7 +41,7 @@ def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL
         logger.error(f"OpenRouter call failed: {str(e)}")
         return {"error": str(e)}
 
-def call_perplexity(query: str, model: str = "sonar") -> Dict:
+def call_perplexity(query: str, model: str = "sonar-reasoning") -> Dict:
     """Call Perplexity API for search."""
     try:
         headers = {
@@ -80,8 +80,10 @@ def call_perplexity(query: str, model: str = "sonar") -> Dict:
             json=payload
         )
         result = response.json()
+        content = result['choices'][0]['message']['content']
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
         return {
-            "content": result['choices'][0]['message']['content'],
+            "content": content,
             "citations": result.get('citations', [])
         }
                 
@@ -165,21 +167,14 @@ def process_citations():
 def analyze_task(query: str, history: List[Dict]) -> Dict:
     """Task analysis and planning"""
     
-    prompt = """You need to break down the content in the discussion of research topic before into detailed sub-questions and generate 1 ~ 3 search queries for each sub-question, describing the keywords in natural language, without using overly specific search terms.
+    prompt = """You need to break down the content in the discussion of research topic before into detailed sub-questions and generate one detail search queriy for each sub-question.
     Keywords like "2024" or "launch date" should be avoided.
-    For example sub-question: 
-    Q1: What are the differences in target markets and service offerings between Starlink and OneWeb in 2024?
-    Can generate the following search questions:
-    1. Starlink target market in 2024
-    2. Starlink service offerings in 2024
-    3. Oneweb target market in 2024
-    4. Oneweb service offerings in 2024
-    Response format example:
+    Response format:
     {
         "sub_questions": [
             {
-                "question": "Research Goal",
-                "keywords": ["Search term 1", "Search term 2"]
+                "question": "detailed describe the research goal of the sub_question, and the expectation of what you want to get from the search",
+                "query": ["One search query with detailed describe"]
             }
         ]
     }"""
@@ -195,7 +190,7 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
 def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
     """Execute dynamic search process (integrated result saving)"""
 
-    search_queue = deque(sub_question["keywords"])
+    search_queue = deque(sub_question["query"])
     processed = set()
     results = []
 
@@ -216,21 +211,21 @@ def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -
             processed.add(query)
 
         if depth < MAX_SEARCH_DEPTH and current_results:
-            analysis_prompt = f"""the main goal of the research is {main_goal}.
-            Synthesize the following results:
+            analysis_prompt = f"""The main goal of the research is {main_goal}.
             ## Sub Question:{sub_question['question']}
+            Synthesize the following results:
             ## Current Search Results:
             {current_results}
             please generate:
             1. Completeness score(0-100): Judge whether the search results are complete and sufficient to answer the sub-question and main goal or not.
             2. Statement of supplementary search directions needed
-            3. New precise search terms (up to 3) based on the statement of suplementary search directions needed.
+            3. New search query based on the statement of suplementary search directions needed, with concisely and detailed describe.
             Respond according to the following JSON format:
             ```json
             {{
                 "score": Completeness score,
                 "missing_info": Statement of supplementary search directions needed,
-                "new_queries": ["New Search query 1", "New Search query 2"]
+                "new_query": ["New Search query"]
             }}
             ```"""
             analysis_response = call_openrouter(analysis_prompt, history, ANALYSIS_MODEL)
@@ -240,9 +235,9 @@ def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -
                 json_string = json_match.group(1).strip()
                 try:
                     analysis = json.loads(json_string)
-                    if "new_queries" in analysis and analysis.get("score", None) < 80:
-                        print(f"\nGet {analysis.get("score", 0)}. {analysis.get("missing_info", None)} Add supplementary search: {analysis['new_queries']}\n")
-                        search_queue.extend(analysis["new_queries"])
+                    if "new_query" in analysis and analysis.get("score", None) < 80:
+                        print(f"\nGet {analysis.get("score", 0)}. {analysis.get("missing_info", None)} \nAdd supplementary search: {analysis['new_query']}\n")
+                        search_queue.extend(analysis["new_query"])
                     else:
                         print(f"\nGet {analysis.get("score", 0)}. No supplementary search needed\n")
                 except json.JSONDecodeError as e:
@@ -256,7 +251,7 @@ def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -
         if not search_queue:
             break
 
-def generate_research_report(history: List[Dict]) -> str:
+def generate_research_report(main_goal: List[Dict]) -> str:
     """Generate the final research report (integrated processed content)"""
 
     processed_content = process_citations()
@@ -265,7 +260,7 @@ def generate_research_report(history: List[Dict]) -> str:
             Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list."""
     return call_openrouter(
         prompt=prompt + "\n" + processed_content,
-        history=history,
+        history=main_goal,
         model=WRITING_MODEL
     )
     
@@ -291,21 +286,28 @@ def main_flow():
     try:
         user_query = input("Please enter the research topic:")
 
-        print("\nPerforming initial search\n")
-        init_search = call_perplexity(user_query, "sonar")['content']
-        user_prompt = f"""Discuss the research direction with the user and correct.
-                    This is the initial search result for this research topic, which gives you some preliminary understanding of the topic to propose the correct research direction: {init_search}
-                    This is the research topic and content that the user wants: {user_query}"""
+        if input("Need initial search? (y/n)").lower() == "y":
+            print("\nPerforming initial search\n")
+            init_search = call_perplexity(user_query, "sonar")['content']
+            user_prompt = f"""Discuss the research direction with the user and correct.
+                        This is the initial search result for this research topic, 
+                        which gives you some preliminary understanding of the topic to propose the correct research direction: {init_search}
+                        This is the research topic and content that the user wants: {user_query}
+                        List the questions you need to ask the user in the end, and keep update the research direction in every conversation."""
+        else:
+            user_prompt = f"""Discuss the research direction with the user and correct.
+                        This is the research topic and content that the user wants: {user_query}
+                        List the questions you need to ask the user in the end, and keep update the research direction in every conversation."""
         print("\n" + call_openrouter(user_prompt, conversation_history))
         while True:
-            comfirmation = input("Does the above research content meet your needs? (y/n)").lower()
+            comfirmation = input("Anything you want to change? (y/n)").lower()
             if comfirmation == "y":
-                break
-            else:
-                user_query = input("Please re-enter the research topic:")
+                user_query = input("Please enter your thoughts: ")
                 print(call_openrouter(user_query, conversation_history))
+            else:
+                break
         print("\n")
-        main_goal = conversation_history
+        main_goal = list(conversation_history[-1])
         
         # Task Analysis Stage
         print("Analyzing research tasks...")
