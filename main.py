@@ -1,8 +1,9 @@
+import asyncio
+import aiohttp
 import os
 import json
 import re
 import logging
-import requests
 from openai import OpenAI
 from collections import deque
 from typing import List, Dict
@@ -10,6 +11,7 @@ from datetime import date
 
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+RESEARCH_REPORT_FILE = "research_report.md"
 SEARCH_RESULTS_FILE = "search_results.md"
 SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS = "search_results_with_global_citations.md"
 DEFAULT_MODEL = "google/gemini-2.0-flash-001"
@@ -41,13 +43,14 @@ def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL
         logger.error(f"OpenRouter call failed: {str(e)}")
         return {"error": str(e)}
 
-def call_perplexity(query: str, model: str = "sonar-reasoning") -> Dict:
-    """Call Perplexity API for search."""
+async def call_perplexity_async(session: aiohttp.ClientSession, query: str, model: str = "sonar-reasoning") -> Dict:
+    """Asyncornously call Perplexity API."""
     try:
         headers = {
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
             "Content-Type": "application/json"
         }
+
         content = """Your job is to use the search tool to provide accurate search results based on the query with citations in the following format:
                 - \"Ice is less dense than water[1].\" or \"Paris is the capital of France[1][4][5].\"
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
@@ -60,7 +63,7 @@ def call_perplexity(query: str, model: str = "sonar-reasoning") -> Dict:
                 - Use headings level 2 and 3 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
                 - Use single new lines for lists and double new lines for paragraphs.
                 - NEVER write URLs or links"""
-        
+
         payload = {
             "model": model,
             "messages": [
@@ -69,23 +72,21 @@ def call_perplexity(query: str, model: str = "sonar-reasoning") -> Dict:
             ],
             "temperature": 1
         }
-        
-        response = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers=headers,
-            json=payload
-        )
-        result = response.json()
-        content = result['choices'][0]['message']['content']
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-        return {
-            "content": content,
-            "citations": result.get('citations', [])
-        }
-                
+
+        async with session.post("https://api.perplexity.ai/chat/completions", headers=headers, json=payload) as response:
+            response.raise_for_status()
+            result = await response.json()
+            content = result['choices'][0]['message']['content']
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+            return {
+                "query": query,
+                "content": content,
+                "citations": result.get('citations', [])
+            }
+
     except Exception as e:
-        logger.error(f"Perplexity search failed: {str(e)}")
-        return {"content": f"Search Error: {str(e)}", "citations": []}
+        logger.error(f"Perplexity search failed for query '{query}': {str(e)}")
+        return {"query": query, "content": f"Search Error: {str(e)}", "citations": []}
 
 def save_search_result(query: str, result: Dict):
     """Save search result to file."""
@@ -183,69 +184,74 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
     json_str = re.search(r'```json\n(.*?)\n```', response, re.DOTALL).group(1)
     return json.loads(json_str)
 
-def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
-    """Execute dynamic search process (integrated result saving)"""
+async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
+    """Asyncronously execute dynamic search process (integrated result saving)"""
 
     search_queue = deque(sub_question["query"])
     processed = set()
     results = []
 
-    for depth in range(MAX_SEARCH_DEPTH + 1):
-        current_results = []
+    async with aiohttp.ClientSession() as session:
+        for depth in range(MAX_SEARCH_DEPTH + 1):
+            current_results = []
+            tasks = []
 
-        while search_queue:
-            query = search_queue.popleft()
-            if query in processed:
-                continue
+            while search_queue:
+                query = search_queue.popleft()
+                if query in processed:
+                    continue
 
-            print(f"Searching [{sub_question['question']}] - {query}")
-            result = call_perplexity(query)
+                print(f"Searching [{sub_question['question']}] - {query}")
+                tasks.append(call_perplexity_async(session, query))
+                processed.add(query)
 
-            save_search_result(query, result)
+            api_responses = await asyncio.gather(*tasks)
+            for response in api_responses:
+                 save_search_result(response["query"], response)
+                 current_results.append(response["content"])
+                 
 
-            current_results.append(result["content"])
-            processed.add(query)
+            if depth < MAX_SEARCH_DEPTH and current_results:
+                analysis_prompt = f"""The main goal of the research is {main_goal}.
+                ## Sub Question:{sub_question['question']}
+                Synthesize the following results:
+                ## Current Search Results:
+                {current_results}
+                please generate:
+                1. Completeness score(0-100): Judge whether the search results are complete and sufficient to answer the sub-question and main goal or not.
+                2. Statement of supplementary search directions needed
+                3. New search query based on the statement of suplementary search directions needed, with concisely and detailed describe.
+                Respond according to the following JSON format:
+                ```json
+                {{
+                    "score": Completeness score,
+                    "missing_info": Statement of supplementary search directions needed,
+                    "new_query": ["New Search query"]
+                }}
+                ```"""
+                analysis_response = call_openrouter(analysis_prompt, history, ANALYSIS_MODEL)
+                json_match = re.search(r'```json\n(.*?)\n```', analysis_response, re.DOTALL)
 
-        if depth < MAX_SEARCH_DEPTH and current_results:
-            analysis_prompt = f"""The main goal of the research is {main_goal}.
-            ## Sub Question:{sub_question['question']}
-            Synthesize the following results:
-            ## Current Search Results:
-            {current_results}
-            please generate:
-            1. Completeness score(0-100): Judge whether the search results are complete and sufficient to answer the sub-question and main goal or not.
-            2. Statement of supplementary search directions needed
-            3. New search query based on the statement of suplementary search directions needed, with concisely and detailed describe.
-            Respond according to the following JSON format:
-            ```json
-            {{
-                "score": Completeness score,
-                "missing_info": Statement of supplementary search directions needed,
-                "new_query": ["New Search query"]
-            }}
-            ```"""
-            analysis_response = call_openrouter(analysis_prompt, history, ANALYSIS_MODEL)
-            json_match = re.search(r'```json\n(.*?)\n```', analysis_response, re.DOTALL)
+                if json_match:
+                    json_string = json_match.group(1).strip()
+                    try:
+                        analysis = json.loads(json_string)
+                        if "new_query" in analysis and analysis.get("score", None) < 80:
+                            print(f"\nGet {analysis.get('score', 0)}. {analysis.get('missing_info', None)} \nAdd supplementary search: {analysis['new_query']}\n")
+                            search_queue.extend(analysis["new_query"])
+                        else:
+                            print(f"\nGet {analysis.get('score', 0)}. No supplementary search needed\n")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSONDecodeError: {e}")
+                        logger.error(f"Problematic JSON string: {json_string}")
+                else:
+                    logger.error("No JSON block found in analysis_response.")
+                    logger.error(f"Full analysis_response: {analysis_response}")
 
-            if json_match:
-                json_string = json_match.group(1).strip()
-                try:
-                    analysis = json.loads(json_string)
-                    if "new_query" in analysis and analysis.get("score", None) < 80:
-                        print(f"\nGet {analysis.get("score", 0)}. {analysis.get("missing_info", None)} \nAdd supplementary search: {analysis['new_query']}\n")
-                        search_queue.extend(analysis["new_query"])
-                    else:
-                        print(f"\nGet {analysis.get("score", 0)}. No supplementary search needed\n")
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSONDecodeError: {e}")
-                    logger.error(f"Problematic JSON string: {json_string}")
-            else:
-                logger.error("No JSON block found in analysis_response.")
-                logger.error(f"Full analysis_response: {analysis_response}")
-
-        results.extend(current_results)
-        if not search_queue:
-            break
+            results.extend(current_results)
+            if not search_queue:
+                break
+    return results
 
 def generate_research_report(main_goal: List[Dict]) -> str:
     """Generate the final research report (integrated processed content)"""
@@ -284,7 +290,13 @@ def main_flow():
 
         if input("Need initial search? (y/n)").lower() == "y":
             print("\nPerforming initial search\n")
-            init_search = call_perplexity(user_query, "sonar")['content']
+
+            async def get_initial_search():
+                async with aiohttp.ClientSession() as session:
+                    return await call_perplexity_async(session, user_query, "sonar")
+            
+            init_search_result = asyncio.run(get_initial_search())
+            init_search = init_search_result['content']
             user_prompt = f"""Discuss the research direction with the user and correct.
                         This is the initial search result for this research topic, 
                         which gives you some preliminary understanding of the topic to propose the correct research direction: {init_search}
@@ -310,10 +322,10 @@ def main_flow():
         task_plan = analyze_task(user_query, conversation_history)
         print(json.dumps(task_plan, indent=4))
         
-        # Dynamic Search Execution
+        # Dynamic Search Stage
         print("Starting to execute in-depth search...")
         for sub in task_plan["sub_questions"]:
-            execute_dynamic_search(sub, conversation_history, main_goal)
+             asyncio.run(execute_dynamic_search(sub, conversation_history, main_goal))
         
         # Generate Final Report
         print("Generating research report...")
@@ -331,5 +343,9 @@ if __name__ == "__main__":
     # Clear old files during initialization
     if os.path.exists(SEARCH_RESULTS_FILE):
         os.remove(SEARCH_RESULTS_FILE)
+    if os.path.exists(RESEARCH_REPORT_FILE):
+        os.remove(RESEARCH_REPORT_FILE)
+    if os.path.exists(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS):
+        os.remove(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS)
     
     main_flow()
