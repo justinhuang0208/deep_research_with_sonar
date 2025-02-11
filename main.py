@@ -27,13 +27,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL) -> Dict:
-    """OpenRouter api call"""
+    """Call OpenRouter API for chat completion."""
     try:
         history.append({"role": "user", "content": prompt})
         response = client.chat.completions.create(
             model=model,
             messages=history + [{"role": "user", "content": prompt}],
-            temperature=1,
+            temperature=1
         )
         history.append({"role": "assistant", "content": response.choices[0].message.content})
         return response.choices[0].message.content
@@ -48,21 +48,17 @@ def call_perplexity(query: str, model: str = "sonar-reasoning") -> Dict:
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
             "Content-Type": "application/json"
         }
-        content = """You are a world class research assistant; your sole job is to use the search tool to provide accurate search results based on the query with citations in the following format:
-                - \"Ice is less dense than water[1][2].\" or \"Paris is the capital of France[1][4][5].\"
+        content = """Your job is to use the search tool to provide accurate search results based on the query with citations in the following format:
+                - \"Ice is less dense than water[1].\" or \"Paris is the capital of France[1][4][5].\"
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
                 - If you don't know the answer or the premise is incorrect, explain why.
                 If the search results are empty or unhelpful, answer the query as well as you can with existing knowledge.
-                You MUST NEVER use moralization or hedging language. AVOID using the following phrases:
-- "It is important to ..."
-- "It is inappropriate ..."
-- "It is subjective ..."
+                Make users can understand your arguments clearly without having to click on citations.
                 You MUST ADHERE TO the following formatting instructions:
                 - Use markdown to format paragraphs, lists, tables, and quotes whenever possible.
                 - Avoid responding solely with lists; incorporate your answers into coherent paragraphs.
                 - Use headings level 2 and 3 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
                 - Use single new lines for lists and double new lines for paragraphs.
-                - Use markdown to render images given in the search results.
                 - NEVER write URLs or links"""
         
         payload = {
@@ -284,7 +280,7 @@ def main_flow():
     conversation_history = [{"role": "system", "content": system_prompt}]
     
     try:
-        user_query = input("Please enter the research topic:")
+        user_query = input("Please enter the research topic: ")
 
         if input("Need initial search? (y/n)").lower() == "y":
             print("\nPerforming initial search\n")
@@ -303,7 +299,7 @@ def main_flow():
             comfirmation = input("Anything you want to change? (y/n)").lower()
             if comfirmation == "y":
                 user_query = input("Please enter your thoughts: ")
-                print(call_openrouter(user_query, conversation_history))
+                print("\n" + call_openrouter(user_query, conversation_history) + "\n")
             else:
                 break
         print("\n")
