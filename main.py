@@ -50,7 +50,7 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
             "Content-Type": "application/json"
         }
 
-        content = """Your job is to use the search tool to provide accurate search results.
+        content = """Your job is to use the search tool to provide accurate and detailed search results.
                 The citation format is [number] and should be used to reference the search results in the final answer, especially the statment of numbers.
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
                 - If you don't know the answer or the premise is incorrect, explain why.
@@ -58,7 +58,7 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
                 Make users can understand your arguments clearly without having to click on citations.
                 You MUST ADHERE TO the following formatting instructions:
                 - Use markdown to format paragraphs, lists, tables, and quotes whenever possible.
-                - Use headings level 2 and 3 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
+                - Use headings level 3 and 4 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
                 - NEVER write URLs or links"""
 
         payload = {
@@ -100,63 +100,82 @@ def save_search_result(query: str, result: Dict):
         f.write("***\n\n")
 
 def process_citations():
-    """Process global citation numbers and return replaced content."""
-    # Read original file
+    """Processes citations, creates a global list, and replaces in-text markers."""
+
     with open(SEARCH_RESULTS_FILE, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Split by level 1 headers (paragraphs starting with "# ")
     sections = re.split(r'(?=^# .+$)', content, flags=re.MULTILINE)
 
-    # Initialize global citation management
     global_citations = []
     current_global_id = 0
+    citation_map_all = {}  # Local ID -> Global ID
+    used_global_ids = set()  # Keep track of used global IDs
 
-    # Process each section
+    # --- PASS 1: Extract Citations and Build Mapping ---
     for i, section in enumerate(sections):
         if not section.strip():
             continue
 
-        # Extract the citation part of the section
         citations_match = re.search(r'## citations\n([\s\S]+?)(?=\n##|\Z)', section)
         if not citations_match:
             continue
 
-        # Extract the original citation list
         local_citations = re.findall(r'\d+\.\s+(https?://\S+)', citations_match.group(1))
 
-        # Generate citation map: local ID -> global ID
-        citation_map = {}
         for local_id, url in enumerate(local_citations, start=1):
             current_global_id += 1
-            global_citations.append(f"{current_global_id}. {url}")
-            citation_map[local_id] = current_global_id
+            global_citations.append(f"{current_global_id}. {url}")  # Still add all initially
+            citation_map_all[f"{i+1}-{local_id}"] = current_global_id
 
-        # Replace citation markers in the text
+        # Remove the original citation section:
+        sections[i] = re.sub(r'## citations\n[\s\S]+?(?=\n##|\Z)', '', section)
+
+
+    # --- PASS 2: Replace Citation Markers and Track Usage ---
+    for i, section in enumerate(sections):
+        if not section.strip():
+            continue
+
         def replace_citation(match):
-            local_ids = [int(id) for id in re.findall(r'\d+', match.group(0))]
-            global_ids = [str(citation_map[id]) for id in local_ids]
-            return f"[{']['.join(global_ids)}]"
+            original_text = match.group(0)
 
-        updated_section = re.sub(r'\[\d+(?:][\d+]*)*\]', replace_citation, section)
+            local_ids_str = re.findall(r'\d+', original_text)
+            local_ids = [int(id_str) for id_str in local_ids_str]
+            
+            global_ids = []
+            for local_id in local_ids:
+                key = f"{i+1}-{local_id}"
+                if key in citation_map_all:
+                    global_id = citation_map_all[key]
+                    global_ids.append(str(global_id))
+                    used_global_ids.add(global_id)  # Mark as used!
+            
+            if not global_ids:
+                return original_text
 
-        # Update the citation list of the section
-        updated_section = re.sub(
-            r'## citations\n[\s\S]+?(?=\n##|\Z)',
-            f"## citations\n" + "\n".join(f"{citation_map[id]}. {url}" 
-                                        for id, url in enumerate(local_citations, start=1)),
-            updated_section,
-            flags=re.DOTALL
-        )
+            replacement = f"[{']['.join(global_ids)}]"
+            return replacement
 
+        updated_section = re.sub(r'\[\d+(?:,\s*\d+)*\]', replace_citation, section)
+        updated_section = re.sub(r'\[\d+(?:\]\[\d+)*\]', replace_citation, updated_section)
         sections[i] = updated_section
 
-    # Merge the processed content
-    processed_content = "\n".join(filter(None, sections))
-    with open(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS, "w", encoding="utf-8") as f:
-        f.write(processed_content)
 
-    return processed_content
+    # --- PASS 3: Filter Global Citations ---
+    filtered_global_citations = [
+        citation for citation in global_citations
+        if int(citation.split(".")[0]) in used_global_ids
+    ]
+
+    # --- Combine and Add Filtered Global Citations ---
+    processed_content = "\n".join(filter(None, sections))
+    processed_global_citation = "\n".join(filtered_global_citations)
+
+    with open(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS, "w", encoding="utf-8") as f:
+        f.write(processed_content + "\n\n# Global Citations\n" + processed_global_citation)
+
+    return processed_content, processed_global_citation
 
 def analyze_task(query: str, history: List[Dict]) -> Dict:
     """Task analysis and planning"""
@@ -263,14 +282,14 @@ def generate_research_report(main_goal: List[Dict]) -> str:
     """Generate the final research report (integrated processed content)"""
 
     try:
-        processed_content = process_citations()
+        processed_content, global_citations = process_citations()
         prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. The report should be persuasive, explain the cause and effect relationships.
-                Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list."""
+                Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited."""
         return call_openrouter(
             prompt=prompt + "\n" + processed_content,
             history=main_goal,
             model=WRITING_MODEL
-        )
+        ), global_citations
     except Exception as e:
         logger.error(f"Report generation failed: {str(e)}")
         return "# Research Report\nGeneration failed due to internal error"
@@ -343,11 +362,11 @@ def main_flow():
         
         # Generate Final Report
         print("\n===Generating research report===")
-        report = generate_research_report(main_goal)
+        report, global_citations = generate_research_report(main_goal)
         
         # Save Results
         with open("research_report.md", "w", encoding="utf-8") as f:
-            f.write(report)
+            f.write(report + "\n\n# Global Citations\n" + global_citations)
         print(f"\nReport saved to: research_report.md")
         
     except Exception as e:
