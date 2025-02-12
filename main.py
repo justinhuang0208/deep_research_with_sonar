@@ -17,7 +17,6 @@ SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS = "search_results_with_global_citations
 DEFAULT_MODEL = "google/gemini-2.0-flash-001"
 ANALYSIS_MODEL = "deepseek/deepseek-r1"
 WRITING_MODEL = "google/gemini-2.0-flash-001"
-MAX_SEARCH_DEPTH = 2
 MODEL_ENDPOINT = "https://openrouter.ai/api/v1"
 
 client = OpenAI(
@@ -191,7 +190,7 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
         logger.error(f"Problematic response: {response}")
         return {"sub_questions": []} 
 
-async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
+async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal, max_search_depth: int) -> Dict:
     """Asyncronously execute dynamic search process (integrated result saving)"""
 
     search_queue = deque(sub_question["query"])
@@ -199,7 +198,7 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
     results = []
 
     async with aiohttp.ClientSession() as session:
-        for depth in range(MAX_SEARCH_DEPTH + 1):
+        for depth in range(max_search_depth + 1):
             current_results = []
             tasks = []
 
@@ -218,7 +217,7 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
                  current_results.append(response["content"])
                  
 
-            if depth < MAX_SEARCH_DEPTH and current_results:
+            if depth < max_search_depth and current_results:
                 analysis_prompt = f"""The main goal of the research is {main_goal}.
                 ## Sub Question:{sub_question['question']}
                 Synthesize the following results:
@@ -297,6 +296,7 @@ def main_flow():
     
     try:
         user_query = input("\nPlease enter the research topic: ")
+        max_search_depth = int(input("Please enter the maximum search depth: "))
 
         if input("Need initial search? (y/n)").lower() == "y":
             print("\n===Performing initial search===")
@@ -339,7 +339,7 @@ def main_flow():
         print("\n===Starting to execute in-depth search===")
         for i, sub in enumerate(task_plan["sub_questions"]):
             print(f"\n=== Searching sub-question {i+1} of {num_sub_questions} ===")
-            asyncio.run(execute_dynamic_search(sub, conversation_history, main_goal))
+            asyncio.run(execute_dynamic_search(sub, conversation_history, main_goal, max_search_depth))
         
         # Generate Final Report
         print("\n===Generating research report===")
