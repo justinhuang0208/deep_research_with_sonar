@@ -28,7 +28,7 @@ client = OpenAI(
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL) -> Dict:
+def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL) -> str:
     """Call OpenRouter API for chat completion."""
     try:
         history.append({"role": "user", "content": prompt})
@@ -43,7 +43,7 @@ def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL
         logger.error(f"OpenRouter call failed: {str(e)}")
         return {"error": str(e)}
 
-async def call_perplexity_async(session: aiohttp.ClientSession, query: str, model: str = "sonar-reasoning") -> Dict:
+async def call_perplexity_async(session: aiohttp.ClientSession, query: str, model: str = "sonar") -> Dict:
     """Asyncornously call Perplexity API."""
     try:
         headers = {
@@ -51,17 +51,15 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
             "Content-Type": "application/json"
         }
 
-        content = """Your job is to use the search tool to provide accurate search results based on the query with citations in the following format:
-                - \"Ice is less dense than water[1].\" or \"Paris is the capital of France[1][4][5].\"
+        content = """Your job is to use the search tool to provide accurate search results.
+                The citation format is [number] and should be used to reference the search results in the final answer, especially the statment of numbers.
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
                 - If you don't know the answer or the premise is incorrect, explain why.
                 If the search results are empty or unhelpful, answer the query as well as you can with existing knowledge.
                 Make users can understand your arguments clearly without having to click on citations.
                 You MUST ADHERE TO the following formatting instructions:
                 - Use markdown to format paragraphs, lists, tables, and quotes whenever possible.
-                - Avoid responding solely with lists; incorporate your answers into coherent paragraphs.
                 - Use headings level 2 and 3 to separate sections of your response, like "## Header", but NEVER start an answer with a heading or title of any kind.
-                - Use single new lines for lists and double new lines for paragraphs.
                 - NEVER write URLs or links"""
 
         payload = {
@@ -73,11 +71,11 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
             "temperature": 1
         }
 
-        async with session.post("https://api.perplexity.ai/chat/completions", headers=headers, json=payload) as response:
+        async with session.post("https://api.perplexity.ai/chat/completions", headers=headers, json=payload, timeout=120) as response:
             response.raise_for_status()
             result = await response.json()
             content = result['choices'][0]['message']['content']
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+            # content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
             return {
                 "query": query,
                 "content": content,
@@ -164,14 +162,14 @@ def process_citations():
 def analyze_task(query: str, history: List[Dict]) -> Dict:
     """Task analysis and planning"""
     
-    prompt = """You need to break down the content in the discussion of research topic before into detailed sub-questions and generate one detail search queriy for each sub-question.
+    prompt = """You need to break down the content in the discussion of research topic before into detailed sub-questions and generate 1 to 3 detail search queries for each sub-question.
     Keywords like "2024" or "launch date" should be avoided.
     Response format:
     {
         "sub_questions": [
             {
                 "question": "detailed describe the research goal of the sub_question, and the expectation of what you want to get from the search",
-                "query": ["One search query with detailed describe"]
+                "query": ["Search query with detailed describe"]
             }
         ]
     }"""
@@ -181,8 +179,17 @@ def analyze_task(query: str, history: List[Dict]) -> Dict:
         history=history,
         model=ANALYSIS_MODEL
     )
-    json_str = re.search(r'```json\n(.*?)\n```', response, re.DOTALL).group(1)
-    return json.loads(json_str)
+    try:
+        json_match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
+        if not json_match:
+            raise ValueError("No JSON block found in response")
+            
+        json_str = json_match.group(1)
+        return json.loads(json_str)
+    except Exception as e:
+        logger.error(f"Failed to parse analysis response: {str(e)}")
+        logger.error(f"Problematic response: {response}")
+        return {"sub_questions": []} 
 
 async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_goal) -> Dict:
     """Asyncronously execute dynamic search process (integrated result saving)"""
@@ -218,13 +225,11 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
                 ## Current Search Results:
                 {current_results}
                 please generate:
-                1. Completeness score(0-100): Judge whether the search results are complete and sufficient to answer the sub-question and main goal or not.
-                2. Statement of supplementary search directions needed
-                3. New search query based on the statement of suplementary search directions needed, with concisely and detailed describe.
+                1. Statement of supplementary search directions needed
+                2. New 1 to 3 search queries based on the statement of suplementary search directions needed, with concisely and detailed describe.
                 Respond according to the following JSON format:
                 ```json
                 {{
-                    "score": Completeness score,
                     "missing_info": Statement of supplementary search directions needed,
                     "new_query": ["New Search query"]
                 }}
@@ -236,16 +241,18 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
                     json_string = json_match.group(1).strip()
                     try:
                         analysis = json.loads(json_string)
-                        if "new_query" in analysis and analysis.get("score", None) < 80:
-                            print(f"\nGet {analysis.get('score', 0)}. {analysis.get('missing_info', None)} \nAdd supplementary search: {analysis['new_query']}\n")
+                        if "new_query" in analysis:
+                            print(f"\n{analysis.get('missing_info', None)} \nAdd supplementary search: {analysis['new_query']}\n")
                             search_queue.extend(analysis["new_query"])
                         else:
-                            print(f"\nGet {analysis.get('score', 0)}. No supplementary search needed\n")
+                            print(f"\nNo supplementary search needed\n")
                     except json.JSONDecodeError as e:
                         logger.error(f"JSONDecodeError: {e}")
                         logger.error(f"Problematic JSON string: {json_string}")
+                        analysis = {"new_query": []}
                 else:
                     logger.error("No JSON block found in analysis_response.")
+                    analysis = {"new_query": []}
                     logger.error(f"Full analysis_response: {analysis_response}")
 
             results.extend(current_results)
@@ -256,15 +263,18 @@ async def execute_dynamic_search(sub_question: Dict, history: List[Dict], main_g
 def generate_research_report(main_goal: List[Dict]) -> str:
     """Generate the final research report (integrated processed content)"""
 
-    processed_content = process_citations()
-
-    prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. The report should be persuasive, explain the cause and effect relationships.
-            Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list."""
-    return call_openrouter(
-        prompt=prompt + "\n" + processed_content,
-        history=main_goal,
-        model=WRITING_MODEL
-    )
+    try:
+        processed_content = process_citations()
+        prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. The report should be persuasive, explain the cause and effect relationships.
+                Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited; at the end of the report, list all the references you have used above in an ordered list."""
+        return call_openrouter(
+            prompt=prompt + "\n" + processed_content,
+            history=main_goal,
+            model=WRITING_MODEL
+        )
+    except Exception as e:
+        logger.error(f"Report generation failed: {str(e)}")
+        return "# Research Report\nGeneration failed due to internal error"
     
 def organize_search_results(search_results: List[Dict]) -> str:
     """Organize all the search results in the same sub-question"""
@@ -286,10 +296,10 @@ def main_flow():
     conversation_history = [{"role": "system", "content": system_prompt}]
     
     try:
-        user_query = input("Please enter the research topic: ")
+        user_query = input("\nPlease enter the research topic: ")
 
         if input("Need initial search? (y/n)").lower() == "y":
-            print("\nPerforming initial search\n")
+            print("\n===Performing initial search===")
 
             async def get_initial_search():
                 async with aiohttp.ClientSession() as session:
@@ -301,11 +311,11 @@ def main_flow():
                         This is the initial search result for this research topic, 
                         which gives you some preliminary understanding of the topic to propose the correct research direction: {init_search}
                         This is the research topic and content that the user wants: {user_query}
-                        List the questions you need to ask the user in the end, and keep update the research direction in every conversation."""
+                        List the questions you need to ask the user in the end, and keep update the research plan in every conversation."""
         else:
             user_prompt = f"""Discuss the research direction with the user and correct.
                         This is the research topic and content that the user wants: {user_query}
-                        List the questions you need to ask the user in the end, and keep update the research direction in every conversation."""
+                        List the questions you need to ask the user in the end, and keep update the research plan in every conversation."""
         print("\n" + call_openrouter(user_prompt, conversation_history))
         while True:
             comfirmation = input("Anything you want to change? (y/n)").lower()
@@ -318,23 +328,27 @@ def main_flow():
         main_goal = list(conversation_history[-1])
         
         # Task Analysis Stage
-        print("Analyzing research tasks...")
+        print("===Analyzing research tasks===")
         task_plan = analyze_task(user_query, conversation_history)
         print(json.dumps(task_plan, indent=4))
         
+        num_sub_questions = len(task_plan["sub_questions"])
+        print(f"\nTotal number of sub-questions: {num_sub_questions}")
+        
         # Dynamic Search Stage
-        print("Starting to execute in-depth search...")
-        for sub in task_plan["sub_questions"]:
-             asyncio.run(execute_dynamic_search(sub, conversation_history, main_goal))
+        print("\n===Starting to execute in-depth search===")
+        for i, sub in enumerate(task_plan["sub_questions"]):
+            print(f"\n=== Searching sub-question {i+1} of {num_sub_questions} ===")
+            asyncio.run(execute_dynamic_search(sub, conversation_history, main_goal))
         
         # Generate Final Report
-        print("Generating research report...")
+        print("\n===Generating research report===")
         report = generate_research_report(main_goal)
         
         # Save Results
         with open("research_report.md", "w", encoding="utf-8") as f:
             f.write(report)
-        print(f"Report saved to: research_report.md")
+        print(f"\nReport saved to: research_report.md")
         
     except Exception as e:
         logger.error(f"Process execution failed:{str(e)}")
