@@ -8,6 +8,7 @@ from openai import OpenAI
 from collections import deque
 from typing import List, Dict
 from datetime import date
+import time
 
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -27,20 +28,34 @@ client = OpenAI(
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def call_openrouter(prompt: str, history: List[Dict], model: str = DEFAULT_MODEL) -> str:
-    """Call OpenRouter API for chat completion."""
-    try:
-        history.append({"role": "user", "content": prompt})
-        response = client.chat.completions.create(
-            model=model,
-            messages=history + [{"role": "user", "content": prompt}],
-            temperature=1
-        )
-        history.append({"role": "assistant", "content": response.choices[0].message.content})
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"OpenRouter call failed: {str(e)}")
-        return {"error": str(e)}
+def call_openrouter(prompt: str,
+                    history: list,
+                    model: str = DEFAULT_MODEL,
+                    max_retries: int = 3,
+                    retry_delay: float = 1.0) -> str:
+    """Call the OpenRouter API with the given prompt and history."""
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            history.append({"role": "user", "content": prompt})
+            response = client.chat.completions.create(
+                model=model,
+                messages=history + [{"role": "user", "content": prompt}],
+                temperature=1
+            )
+            if not response.choices or not hasattr(response.choices[0], "message"):
+                raise ValueError("Response payload not in expected format")
+
+            result = response.choices[0].message.content
+            history.append({"role": "assistant", "content": result})
+            return result
+
+        except Exception as e:
+            logger.error(f"OpenRouter call failed on attempt {attempt}/{max_retries}: {e}")
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+            else:
+                return ""
 
 async def call_perplexity_async(session: aiohttp.ClientSession, query: str, model: str = "sonar") -> Dict:
     """Asyncornously call Perplexity API."""
@@ -54,6 +69,7 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
                 The citation format is [number] and should be used to reference the search results in the final answer, especially the statment of numbers.
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
                 - If you don't know the answer or the premise is incorrect, explain why.
+                Provide detailed explanations and examples to support your answer.
                 If the search results are empty or unhelpful, answer the query as well as you can with existing knowledge.
                 Make users can understand your arguments clearly without having to click on citations.
                 You MUST ADHERE TO the following formatting instructions:
@@ -125,7 +141,7 @@ def process_citations():
 
         for local_id, url in enumerate(local_citations, start=1):
             current_global_id += 1
-            global_citations.append(f"{current_global_id}. {url}")  # Still add all initially
+            global_citations.append(f"{current_global_id}. {url}")
             citation_map_all[f"{i+1}-{local_id}"] = current_global_id
 
         # Remove the original citation section:
@@ -149,7 +165,7 @@ def process_citations():
                 if key in citation_map_all:
                     global_id = citation_map_all[key]
                     global_ids.append(str(global_id))
-                    used_global_ids.add(global_id)  # Mark as used!
+                    used_global_ids.add(global_id)
             
             if not global_ids:
                 return original_text
@@ -283,7 +299,8 @@ def generate_research_report(main_goal: List[Dict]) -> str:
 
     try:
         processed_content, global_citations = process_citations()
-        prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data. The report must mention all search results. The report should be persuasive, explain the cause and effect relationships.
+        prompt = """According to the conversation histories between user and assistant, merge the content from all search results, add appropriate text paragraphs, and expand it into an in-depth research report covering all search data.
+                The report must mention all search results, don't simplify it. The report should be persuasive, explain the cause and effect relationships.
                 Each important argument or data should be accompanied by the corresponding citation number, e.g.: [1][2]. Ensure the citation format is correct and accurate, while ordinary descriptions do not need to be cited."""
         return call_openrouter(
             prompt=prompt + "\n" + processed_content,
@@ -317,7 +334,7 @@ def main_flow():
         user_query = input("\nPlease enter the research topic: ")
         max_search_depth = int(input("Please enter the maximum search depth: "))
 
-        if input("Need initial search? (y/n)").lower() == "y":
+        if input("Need initial search? (y/n): ").lower() == "y":
             print("\n===Performing initial search===")
 
             async def get_initial_search():
@@ -337,7 +354,7 @@ def main_flow():
                         List the questions you need to ask the user in the end, and keep update the research plan in every conversation."""
         print("\n" + call_openrouter(user_prompt, conversation_history))
         while True:
-            comfirmation = input("Anything you want to change? (y/n)").lower()
+            comfirmation = input("Anything you want to change? (y/n): ").lower()
             if comfirmation == "y":
                 user_query = input("Please enter your thoughts: ")
                 print("\n" + call_openrouter(user_query, conversation_history) + "\n")
@@ -380,5 +397,5 @@ if __name__ == "__main__":
         os.remove(RESEARCH_REPORT_FILE)
     if os.path.exists(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS):
         os.remove(SEARCH_RESULT_FILE_WITH_GLOBAL_CITATIONS)
-    
+
     main_flow()
