@@ -44,7 +44,7 @@ def call_openrouter(prompt: str,
                 temperature=1
             )
             if not response.choices or not hasattr(response.choices[0], "message"):
-                raise ValueError("Response payload not in expected format")
+                return ""
 
             result = response.choices[0].message.content
             history.append({"role": "assistant", "content": result})
@@ -65,10 +65,9 @@ async def call_perplexity_async(session: aiohttp.ClientSession, query: str, mode
             "Content-Type": "application/json"
         }
 
-        content = """Your job is to use the search tool to provide accurate and detailed search results.
+        content = f"""Your job is to use the search tool to provide accurate and detailed search results. Current date: {date.today()}.
                 The citation format is [number] and should be used to reference the search results in the final answer, especially the statment of numbers.
                 - NO SPACE between the last word and the citation, and ALWAYS use brackets. Only use this format to cite search results. NEVER include a References section at the end of your answer.
-                - If you don't know the answer or the premise is incorrect, explain why.
                 Provide detailed explanations and examples to support your answer.
                 If the search results are empty or unhelpful, answer the query as well as you can with existing knowledge.
                 Make users can understand your arguments clearly without having to click on citations.
