@@ -1,8 +1,8 @@
-# Deep Researcher
+# Deep Research with Sonar
 
 ## Overview
 
-Deep Researcher is a Python-based research assistant that automates the process of in-depth research on a given topic. It leverages large language models (LLMs) through the OpenRouter API and search capabilities via the Perplexity API to break down complex research questions, execute dynamic searches, and generate comprehensive research reports.  The system saves intermediate search results and citations, enabling traceable and reproducible research.
+Deep Research with Sonar is a Python-based research assistant that automates the process of in-depth research on a given topic. It leverages large language models (LLMs) through the OpenRouter API and search capabilities via the Perplexity API to break down complex research questions, execute dynamic searches, and generate comprehensive research reports.  The system saves intermediate search results and citations, enabling traceable and reproducible research.
 
 ## Features
 
@@ -31,8 +31,8 @@ Deep Researcher is a Python-based research assistant that automates the process 
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/justinhuang0208/deep_researcher_with_sonar.git
-    cd deep_researcher_with_sonar
+    git clone https://github.com/justinhuang0208/deep_research_with_sonar.git
+    cd deep_research_with_sonar
     ```
 
 2.  **Set environment variables:**
